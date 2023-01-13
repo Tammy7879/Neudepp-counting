@@ -1,0 +1,7 @@
+    product_name
+    product_code ,
+    company_id ,
+    net_weight ,
+    gross_weight,
+    quantity ,
+    date_time,

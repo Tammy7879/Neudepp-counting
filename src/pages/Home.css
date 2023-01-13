@@ -1,0 +1,48 @@
+.pointer{
+    cursor: pointer !important;
+}
+
+.scroll_shown{
+    overflow: auto !important;
+}
+
+.scroll_hidden{
+    overflow: hidden !important;
+}
+
+.txt_small{
+    font-size: small !important;
+}
+
+.txt_larger{
+    font-size: x-large !important;
+}
+
+.txt_bold{
+    font-weight: bold !important;
+}
+
+.open_calender::-webkit-calendar-picker-indicator {
+    background: transparent !important;
+    bottom: 0 !important;
+    color: transparent !important;
+    cursor: pointer !important;
+    height: auto !important;
+    left: 0 !important;
+    position: absolute !important;
+    right: 0 !important;
+    top: 0 !important;
+    width: auto !important;
+}
+
+.bottom_right {
+    position: fixed !important;
+    top: 82% !important;
+    left: 95% !important;
+    transform: translate(-50%, -50%) !important;
+    -webkit-transform: translate(-50%, -50%) !important;
+    -moz-transform: translate(-50%, -50%) !important;
+    -o-transform: translate(-50%, -50%) !important;
+    -ms-transform: translate(-50%, -50%) !important;
+    z-index: 100 !important;
+}

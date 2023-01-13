@@ -1,0 +1,1463 @@
+from flask import request, current_app as app
+from flask_jwt_extended import (
+    create_access_token,
+    create_refresh_token,
+    get_jwt_identity,
+    jwt_required,
+)
+from db_files.settings import DATABASE_NAME
+import pymysql
+from db_files.settings import pool
+
+import subprocess
+
+import numpy as np
+import pandas as pd
+import json
+import shutil
+from wifi import Cell, Scheme
+from custom_decorators import handle_exceptions
+from utils.constants import (
+    USER_ACCESS_ALLOW,
+    USER_ACCESS_DENY,
+    USER_STATE_ACTIVE,
+    USER_STATE_INACTIVE,
+    USER_TYPE_ADMIN,
+    USER_TYPE_OPERATOR,
+    current_datetime,
+)
+from db_files.settings import (
+    TABLE_PRODUCT_INFO,
+    TABLE_COUNTING_DATA,
+    TABLE_COMPANY_INFO,
+    TABLE_USER,
+    decrypt,
+    encrypt,
+)
+from db_files.table_operations import DBTableOperations, Validation, is_ref_exist
+from utils.views_helper_functions import label_view, update_last_active_time
+
+
+# ---------------------- Authentication : Start ----------------------- #
+@handle_exceptions
+@jwt_required()
+def sign_up():
+    print("HII")
+    data = request.get_json()
+    print(data)
+    col_list = ["username", "email", "mobile"]
+    print(col_list)
+    is_exist = Validation().is_record_exist(data, TABLE_USER, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "User already exist with this Username or Email or Mobile !!!",
+        }
+    password = data["password"]
+    data["password"] = encrypt(password)
+    user = DBTableOperations()
+    user.create(table_name=TABLE_USER, data=data)
+    return {"success": True, "message": "User Created Successfully !!!"}
+
+
+@handle_exceptions
+def sign_in():
+    #print("hii")
+    data = request.get_json()
+    #print(data)
+    username_or_email = data["username_or_email"]
+    #print(data["username_or_email"])
+    password = data["password"]
+    query = (
+        "SELECT * FROM "
+        + TABLE_USER
+        + " WHERE username = '"
+        + username_or_email
+        + "' OR email = '"
+        + username_or_email
+        + "' ;"
+    )
+    #print(query)
+
+    conn = pool.connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    #user = DBTableOperations().fetch_one(query)
+    print("***********************")
+    #print(cursor.select_recipe())
+    print("***********************")
+    exe=cursor.execute(query)
+    user = cursor.fetchall()
+
+    #print("####################################################################################")
+    #print(type(user))
+    #print("####################################################################################")
+    #print(user[0]['id'])
+    if not user :
+        return {"success": False, "message": "User Doesn't exist !!!"}
+    else:
+        print("Not None!")
+    
+    if (
+        user[0]["username"] == username_or_email or user[0]["email"] == username_or_email
+    ) and (user[0]["password"] == encrypt(password)):
+        print(str(user[0]["user_access"]))
+        print("**********************************************************************************")
+        print(USER_ACCESS_ALLOW)
+        if (user[0]["user_access"] != 1):
+            print("second if")
+            return {
+                "success": False,
+                "message": "Your access is denied. Please contact to Admin !!!",
+            }
+
+        # if user["is_active"] == USER_STATE_ACTIVE:
+        #     return {"success": False, "message": "You are already logged in another System. Please first logout from another system !!!"}
+        print("done")
+        refresh_token = create_refresh_token(
+            identity=user[0]["id"]
+        )  # Puts User ID as Identity in JWT
+        print(refresh_token)
+        access_token = create_access_token(
+            identity=user[0]["id"], fresh=True
+        )  # Puts User ID as Identity in JWT
+        print(access_token)
+        update_last_active_time(user_id=user[0]["id"])
+        print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+        #print(update_last_active_time)
+        return {
+            "success": True,
+            "is_active": False,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user_type": user[0]["user_type"],
+            "name": user[0]["name"],
+            "username": user[0]["username"],
+            "email": user[0]["email"],
+            "gender": user[0]["gender"],
+        }
+        print("))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))")
+    return {"success": False, "message": "Invalid credentials !!!"}
+
+
+@handle_exceptions
+@jwt_required(refresh=True)
+def token_refresh():
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+    current_user_id = get_jwt_identity()  # Gets Identity from JWT
+    print(current_user_id)
+    query = (
+        "SELECT is_active FROM "
+        + TABLE_USER
+        + " WHERE id = "
+        + str(current_user_id)
+        + ";"
+    )
+    user = DBTableOperations().fetch_one(query)
+    print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
+    print(user)
+    if user["is_active"] == USER_STATE_ACTIVE:
+        new_token = create_access_token(identity=current_user_id, fresh=False)
+        return {"success": True, "access_token": new_token}
+    else:
+        return {"success": False}
+
+
+@handle_exceptions
+@jwt_required(refresh=True)
+def sign_out():
+    current_user_id = get_jwt_identity()  # Gets Identity from JWT
+    update_data = {"is_active": 0}
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_USER, data=update_data, id=current_user_id)
+    return {"success": True}
+
+
+@handle_exceptions
+@jwt_required()
+def get_all_users():
+    operation = DBTableOperations()
+    query = "SELECT * FROM " + TABLE_USER + " ORDER BY id DESC;"
+    data = operation.fetch(query)
+    for i in range(len(data)):
+        data[i]["password"] = decrypt(data[i]["password"])
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def update_user():
+    data = request.get_json()
+    user_access = data["user_access"]
+    user_type = data["user_type"]
+    if user_type == USER_TYPE_ADMIN and user_access == USER_ACCESS_DENY:
+        query = (
+            "SELECT * FROM "
+            + TABLE_USER
+            + " WHERE user_type = "
+            + str(USER_TYPE_ADMIN)
+            + " AND user_access = "
+            + str(USER_ACCESS_ALLOW)
+            + " ;"
+        )
+        admin_users = DBTableOperations().fetch(query)
+        if len(admin_users) < 2:
+            return {
+                "success": False,
+                "message": "Only one ADMIN remains. So can't 'DENY' access of this user.",
+            }
+
+    if user_access == USER_ACCESS_DENY:
+        data["is_active"] = USER_STATE_INACTIVE
+
+    col_list = ["username", "email", "mobile"]
+    is_exist = Validation().is_record_exist(data, TABLE_USER, col_list, is_update=True)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "User already exist with this Username or Email or Mobile !!!",
+        }
+    user_id = data.pop("id")
+    password = data["password"]
+    data["password"] = encrypt(password)
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_USER, data=data, id=user_id)
+    return {"success": True, "message": "User Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_user():
+    data = request.get_json()
+    user_id = data["id"]
+    user_type = data["user_type"]
+    if user_type == USER_TYPE_ADMIN:
+        query = (
+            "SELECT * FROM "
+            + TABLE_USER
+            + " WHERE user_type = "
+            + str(USER_TYPE_ADMIN)
+            + " ;"
+        )
+        admin_users = DBTableOperations().fetch(query)
+        if len(admin_users) < 2:
+            return {
+                "success": False,
+                "message": "Only one ADMIN remains. So can't DELETE this user.",
+            }
+    user_id = data["id"]
+    is_exist = is_ref_exist(TABLE_USER, col_nm="formula", id=user_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This Username created some Data. So can't delete. If you want to delete then first delete all the data which is made by this user !!!",
+        }
+    operation = DBTableOperations()
+    query = "DELETE FROM " + TABLE_USER + " WHERE id = " + str(user_id) + ";"
+    operation.delete(query)
+    return {"success": True, "message": "User Deleted Successfully !!!"}
+
+
+# ------------------------ Authentication : End ----------------------------- #
+
+
+# --------------------- Ingredient Data API : Start --------------------- #
+
+# FORMULA INFO API
+@handle_exceptions
+@jwt_required()
+def get_all_formula_info():
+    operation = DBTableOperations()
+    TABLE_FORMULA_INFO='FormulaInfo'
+    query = f"SELECT * FROM {TABLE_FORMULA_INFO} ORDER BY id DESC;"
+    data = operation.fetch(query)
+    print(data)
+    return {"success": True, "data": data}
+
+@handle_exceptions
+@jwt_required()
+def get_all_ingredient_info_info():
+    print("Hello world!---------------------------------------- start ")
+    req = request.get_json()
+    print(req)
+    print(req['id'])
+    
+    IN_NAME = req['id']
+
+    query1="select id from FormulaInfo fo where `formula_name`= '"+IN_NAME+"'"
+    
+    print(query1)
+    operation = DBTableOperations()
+    TABLE_FORMULA_INFO='FormulaInfo'
+    
+    data_id = operation.fetch(query1)
+    print(type(data_id))
+
+    if(len(data_id)==0):
+        return {"success": False,"message":"Record does not exist!"}
+
+    id_dict=data_id[0]
+
+    print(id_dict)
+    print(type(id_dict))
+   
+    pg_id=id_dict.get('id')
+    print(pg_id)
+    query2="select * from IngredientInfo inb inner join Recipes re ON inb.id=re.ingredient where re.formula="+str(pg_id)+";"
+
+    data=operation.fetch(query2)
+    if(len(data)==0):
+        return {"success": False, "message":"No ingredient found!"}
+        
+    print("-------------------------------------------------------- end ")
+    return {"success": True, "data": data}
+
+@handle_exceptions
+@jwt_required()
+def insert_formula_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["formula_name", "formula_code"]
+    is_exist = Validation().is_record_exist(data, TABLE_FORMULA_INFO, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Formula already exist with this Formula Code or Formula Name !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_FORMULA_INFO, data=data)
+    return {"success": True, "message": "Formula Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_formula_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["formula_name", "formula_code"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_FORMULA_INFO, col_list, is_update=True
+    )
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Formula already exist with this Formula Code or Formula Name !!!",
+        }
+    formula_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_FORMULA_INFO, data=data, id=formula_id)
+    return {"success": True, "message": "Formula Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_formula_info():
+    data = request.get_json()
+    formula_id = data["id"]
+    is_exist = is_ref_exist(TABLE_RECIPES, col_nm="formula", id=formula_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This formula used in Recipe. So can't delete. If you want to delete then first delete all the records in Recipe Making which is made using this formula !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_FORMULA_INFO} WHERE id = {str(formula_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Formula Deleted Successfully !!!"}
+
+
+# INGREDIENT TYPES API
+@handle_exceptions
+@jwt_required()
+def get_all_ingredient_types():
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_INGREDIENT_TYPES} ORDER BY id DESC;"
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_ingredient_type():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["type"]
+    is_exist = Validation().is_record_exist(data, TABLE_INGREDIENT_TYPES, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This Ingredient Type already exist !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_INGREDIENT_TYPES, data=data)
+    return {"success": True, "message": "Ingredient Type Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_ingredient_type():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["type"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_INGREDIENT_TYPES, col_list, is_update=True
+    )
+    if is_exist is True:
+        return {
+            "success": False,
+            "message": "This Ingredient Type already exist !!!",
+        }
+    ingredient_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_INGREDIENT_TYPES, data=data, id=ingredient_id)
+    return {"success": True, "message": "Ingredient Type Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_ingredient_type():
+    data = request.get_json()
+    ingredient_id = data["id"]
+    is_exist = is_ref_exist(
+        TABLE_INGREDIENT_INFO, col_nm="ingredient_type", id=ingredient_id
+    )
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This ingredient type used in Ingredient Info. So can't delete. If you want to delete then first delete all the records in Ingredient Info which is made using this ingredient type !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_INGREDIENT_TYPES} WHERE id = {str(ingredient_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Ingredient Type Deleted Successfully !!!"}
+
+
+# INGREDIENT INFO API
+@handle_exceptions
+@jwt_required()
+def get_all_ingredient_info():
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_INGREDIENT_INFO
+        + ".*, "
+        + TABLE_INGREDIENT_TYPES
+        + ".type FROM "
+        + TABLE_INGREDIENT_INFO
+        + " LEFT JOIN "
+        + TABLE_INGREDIENT_TYPES
+        + " ON "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_type="
+        + TABLE_INGREDIENT_TYPES
+        + ".id ORDER BY id DESC"
+    )
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_ingredient_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["ingredient_name", "ingredient_code"]
+    is_exist = Validation().is_record_exist(data, TABLE_INGREDIENT_INFO, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Ingredient already exist with this Ingredient Code or Ingredient Name !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_INGREDIENT_INFO, data=data)
+    return {"success": True, "message": "Ingredient Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_ingredient_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["ingredient_name", "ingredient_code"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_INGREDIENT_INFO, col_list, is_update=True
+    )
+    if is_exist is True:
+        return {
+            "success": False,
+            "message": "Ingredient already exist with this Ingredient Code or Ingredient Name !!!",
+        }
+    ingredient_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_INGREDIENT_INFO, data=data, id=ingredient_id)
+    return {"success": True, "message": "Ingredient Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_ingredient_info():
+    data = request.get_json()
+    ingredient_id = data["id"]
+    is_exist = is_ref_exist(TABLE_RECIPES, col_nm="ingredient", id=ingredient_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This ingredient used in Recipe. So can't delete. If you want to delete then first delete all the records in Recipe Making which is made using this ingredient !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_INGREDIENT_INFO} WHERE id = {str(ingredient_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Ingredient Deleted Successfully !!!"}
+
+
+# RECIPE INFO API
+@handle_exceptions
+@jwt_required()
+def get_all_recipes():
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_RECIPES
+        + ".*, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_FORMULA_INFO
+        + ".formula_code, "
+        + TABLE_FORMULA_INFO
+        + ".formula_type, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_name, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_code, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_type FROM "
+        + TABLE_RECIPES
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".formula="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_INGREDIENT_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".ingredient="
+        + TABLE_INGREDIENT_INFO
+        + ".id ORDER BY formula"
+    )
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_recipe():
+    print("in recipe")
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    print(user_id)
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["formula", "ingredient"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_RECIPES, col_list, all_unique=True
+    )
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Recipe already exist with this Formula & Ingredient !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    print("ok")
+    operation.create(table_name=TABLE_RECIPES, data=data)
+    
+    return {"success": True, "message": "Recipe Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_recipe():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["formula", "ingredient"]
+    print(data)
+    
+    is_exist = Validation().is_record_exist(
+        data, TABLE_RECIPES, col_list, all_unique=True, is_update=True
+    )
+    if is_exist is True:
+        return {
+            "success": False,
+            "message": "Recipe already exist with this Formula & Ingredient !!!",
+        }
+    recipe_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_RECIPES, data=data, id=recipe_id)
+    return {"success": True, "message": "Recipe Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_recipe():
+    data = request.get_json()
+    recipe_id = data["id"]
+    is_exist = is_ref_exist(TABLE_BATCH_INFO, col_nm="recipe", id=recipe_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This recipe used in Batches. So can't delete. If you want to delete then first delete all the records in Batches which is made using this recipe !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_RECIPES} WHERE id = {str(recipe_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Ingredient Deleted Successfully !!!"}
+
+
+# RECIPE VIEW API
+@handle_exceptions
+@jwt_required()
+def get_all_recipes_view():
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_RECIPES
+        + ".weight_unit, "
+        + TABLE_RECIPES
+        + ".target_limit, "
+        + TABLE_FORMULA_INFO
+        + ".id, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_FORMULA_INFO
+        + ".formula_code, "
+        + TABLE_FORMULA_INFO
+        + ".formula_type, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_name, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_code, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_type FROM "
+        + TABLE_RECIPES
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".formula="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_INGREDIENT_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".ingredient="
+        + TABLE_INGREDIENT_INFO
+        + ".id ORDER BY formula"
+    )
+    data = operation.fetch(query)
+    if not data:
+        return {"success": True, "data": data}
+    df = pd.DataFrame(data)
+    # df.loc[:, 'ingredients'] = df['ingredient_name'].astype(
+    #     str) + ' (' + df['ingredient_code'].astype(str) + ')'
+    # Combine Formulas
+    df.loc[:, "formula"] = (
+        df["formula_code"].astype(str) + " - " + df["formula_name"].astype(str)
+    )
+    # Combine Ingredients
+    df.loc[:, "ingredients"] = (
+        "[ "
+        + df["ingredient_code"].astype(str)
+        + " - "
+        + df["ingredient_name"].astype(str)
+        + " ("
+        + df["target_limit"].astype(str)
+        + " "
+        + df["weight_unit"].astype(str)
+        + ") ]"
+    )
+    # Convert weight in kg
+    df.loc[:, "weight_kg"] = np.where(
+        df["weight_unit"].eq("grams"), df["target_limit"] / 1000, df["target_limit"]
+    )
+    agg_dict = {
+        "id": "first",
+        "formula": "first",
+        "formula_type": "first",
+        "ingredients": " , ".join,
+        "weight_kg": sum,
+    }
+    df = df.groupby("formula_name", as_index=False).agg(agg_dict)
+    df = df.sort_values(by=["id"], ascending=False)
+    final_data = eval(df.to_json(orient="records"))
+    return {"success": True, "data": final_data}
+
+
+# CLIENT INFO API
+@handle_exceptions
+@jwt_required()
+def get_all_client_info():
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_CLIENT_INFO} ORDER BY id DESC;"
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_client_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["client_name", "client_code"]
+    is_exist = Validation().is_record_exist(data, TABLE_CLIENT_INFO, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Client already exist with this Client Code or Client Name !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_CLIENT_INFO, data=data)
+    return {"success": True, "message": "Client Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_client_info():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["client_name", "client_code"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_CLIENT_INFO, col_list, is_update=True
+    )
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Client already exist with this Client Code or Client Name !!!",
+        }
+    client_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_CLIENT_INFO, data=data, id=client_id)
+    return {"success": True, "message": "Client Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_client_info():
+    data = request.get_json()
+    client_id = data["id"]
+    is_exist = is_ref_exist(TABLE_BATCH_INFO, col_nm="client", id=client_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This client used in Batches. So can't delete. If you want to delete then first delete all the records in Batch Making which is made using this client !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_CLIENT_INFO} WHERE id = {str(client_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Client Deleted Successfully !!!"}
+
+
+# BATCH INFO API
+@handle_exceptions
+@jwt_required()
+def get_all_batches():
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_BATCH_INFO
+        + ".*, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_CLIENT_INFO
+        + ".client_name FROM "
+        + TABLE_BATCH_INFO
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".recipe="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_CLIENT_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".client="
+        + TABLE_CLIENT_INFO
+        + ".id ORDER BY id DESC"
+    )
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_batch():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["batch_name", "batch_code"]
+    is_exist = Validation().is_record_exist(data, TABLE_BATCH_INFO, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Batch already exist with this Batch Name & Batch Code !!!",
+        }
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_BATCH_INFO, data=data)
+    return {"success": True, "message": "Batch Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_batch():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    col_list = ["batch_name", "batch_code"]
+    is_exist = Validation().is_record_exist(
+        data, TABLE_BATCH_INFO, col_list, is_update=True
+    )
+    if is_exist is True:
+        return {
+            "success": False,
+            "message": "Batch already exist with this Batch Name & Batch Code !!!",
+        }
+    batch_id = data.pop("id")
+    data["username"] = user_id
+    operation = DBTableOperations()
+    operation.update(table_name=TABLE_BATCH_INFO, data=data, id=batch_id)
+    return {"success": True, "message": "Batch Updated Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_batch():
+    data = request.get_json()
+    batch_id = data["id"]
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_BATCH_INFO} WHERE id = {str(batch_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Batch Deleted Successfully !!!"}
+
+
+# --------------------- Ingredient Data API : End ----------------------- #
+
+
+# --------------------- Select Client API : Start ----------------------- #
+@handle_exceptions
+@jwt_required()
+def get_assigned_client():
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_ASSIGNED_CLIENT
+        + ".*, "
+        + TABLE_BATCH_INFO
+        + ".batch_name, "
+        + TABLE_BATCH_INFO
+        + ".batch_code, "
+        + TABLE_CLIENT_INFO
+        + ".client_name, "
+        + TABLE_CLIENT_INFO
+        + ".client_code, "
+        + TABLE_USER
+        + ".username, "
+        + TABLE_USER
+        + ".name FROM "
+        + TABLE_ASSIGNED_CLIENT
+        + " LEFT JOIN "
+        + TABLE_BATCH_INFO
+        + " ON "
+        + TABLE_ASSIGNED_CLIENT
+        + ".batch="
+        + TABLE_BATCH_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_CLIENT_INFO
+        + " ON "
+        + TABLE_ASSIGNED_CLIENT
+        + ".client="
+        + TABLE_CLIENT_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_USER
+        + " ON "
+        + TABLE_ASSIGNED_CLIENT
+        + ".operator="
+        + TABLE_USER
+        + ".id ORDER BY last_update DESC"
+    )
+    data = operation.fetch_one(query)
+    if data is None:
+        return {
+            "success": False,
+        }
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def batches_by_client():
+    data = request.get_json()
+    client_id = data["client_id"]
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_BATCH_INFO
+        + ".*, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_CLIENT_INFO
+        + ".client_name FROM "
+        + TABLE_BATCH_INFO
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".recipe="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_CLIENT_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".client="
+        + TABLE_CLIENT_INFO
+        + ".id WHERE client="
+        + str(client_id)
+    )
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def get_all_operators():
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_USER} WHERE user_type='{USER_TYPE_OPERATOR}' AND user_access={str(USER_ACCESS_ALLOW)};"
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def assign_batch():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    data["username"] = user_id
+    data["last_update"] = current_datetime()
+    operator = data["operator"]
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_ASSIGNED_CLIENT} WHERE operator={operator};"
+    assigned_client = operation.fetch_one(query)
+    if assigned_client is None:
+        operation = DBTableOperations()
+        operation.create(table_name=TABLE_ASSIGNED_CLIENT, data=data)
+    else:
+        operation = DBTableOperations()
+        operation.update(
+            table_name=TABLE_ASSIGNED_CLIENT, data=data, id=assigned_client["id"]
+        )
+    return {
+        "success": True,
+        "message": "Batch successfully assigned to user !!!",
+    }
+
+
+# --------------------- Select Client API : End ----------------------- #
+
+
+# --------------------- Operator API : Start ----------------------- #
+@handle_exceptions
+@jwt_required()
+def get_batch_details():
+    data = request.get_json()
+    batch_id = data["batch_id"]
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_BATCH_INFO
+        + ".*, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_FORMULA_INFO
+        + ".formula_code, "
+        + TABLE_CLIENT_INFO
+        + ".client_name FROM "
+        + TABLE_BATCH_INFO
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".recipe="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_CLIENT_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".client="
+        + TABLE_CLIENT_INFO
+        + ".id WHERE "
+        + TABLE_BATCH_INFO
+        + ".id="
+        + str(batch_id)
+    )
+    batch_info = operation.fetch_one(query)
+    recipe = batch_info["recipe"]
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_RECIPES
+        + ".*, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_name, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_code FROM "
+        + TABLE_RECIPES
+        + " LEFT JOIN "
+        + TABLE_INGREDIENT_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".ingredient="
+        + TABLE_INGREDIENT_INFO
+        + ".id WHERE "
+        + TABLE_RECIPES
+        + ".formula="
+        + str(recipe)
+    )
+    ingredients = operation.fetch(query)
+    batch_info["ingredients"] = ingredients
+    return {"success": True, "data": batch_info}
+
+
+@handle_exceptions
+@jwt_required()
+def get_batch_count():
+    data = request.get_json()
+    batch_id = data["batch_id"]
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_BATCHES_DATA} WHERE batch={batch_id}"
+    batches = operation.fetch(query)
+    return {"success": True, "batch_count": len(batches) + 1}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_batch_data():
+    data = request.get_json()
+    print("_______________________________________________________________________________________")
+    print(data)
+    print("_______________________________________________________________________________________")
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    data["username"] = user_id
+    data["ingredient_weights"] = json.dumps(data["ingredient_weights"])
+    batch_id = data["batch"]
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_BATCHES_DATA} WHERE batch={batch_id}"
+    batches = operation.fetch(query)
+    data["batch_count"] = len(batches) + 1
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_BATCHES_DATA, data=data)
+    from socketio_files.data_sender import batch_count_change
+
+    batch_count_change(True)
+    return {"success": True, "message": "Batch Created Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def update_scale():
+    data = request.get_json()
+    scale = data["scale"]
+    app.config["SCALE"] = scale
+    return {"success": True, "scale": scale}
+
+
+@handle_exceptions
+@jwt_required()
+def set_tare():
+    tare = 0
+    return {"success": True, "tare": tare}
+
+
+@handle_exceptions
+@jwt_required()
+def set_zero():
+    return {"success": True, "message": "Weight successfully set to zero."}
+
+
+# --------------------- Operator API : End ----------------------- #
+
+
+# --------------------- Report API : End ----------------------- #
+
+
+@handle_exceptions
+@jwt_required()
+def get_batches_data():
+    data = request.get_json()
+    from_date = data["from_date"]
+    to_date = data["to_date"]
+    operation = DBTableOperations()
+    query = (
+        "SELECT "
+        + TABLE_BATCHES_DATA
+        + ".*, "
+        + TABLE_BATCH_INFO
+        + ".batch_name, "
+        + TABLE_BATCH_INFO
+        + ".batch_code, "
+        + TABLE_BATCH_INFO
+        + ".total_batches, "
+        + TABLE_FORMULA_INFO
+        + ".formula_name, "
+        + TABLE_FORMULA_INFO
+        + ".formula_code, "
+        + TABLE_FORMULA_INFO
+        + ".formula_type, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_name, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_code, "
+        + TABLE_INGREDIENT_INFO
+        + ".ingredient_type, "
+        + TABLE_RECIPES
+        + ".target_limit, "
+        + TABLE_RECIPES
+        + ".weight_unit, "
+        + TABLE_CLIENT_INFO
+        + ".client_name, "
+        + TABLE_USER
+        + ".username FROM "
+        + TABLE_BATCHES_DATA
+        + " LEFT JOIN "
+        + TABLE_BATCH_INFO
+        + " ON "
+        + TABLE_BATCHES_DATA
+        + ".batch="
+        + TABLE_BATCH_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_RECIPES
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".recipe="
+        + TABLE_RECIPES
+        + ".formula"
+        + " LEFT JOIN "
+        + TABLE_FORMULA_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".recipe="
+        + TABLE_FORMULA_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_INGREDIENT_INFO
+        + " ON "
+        + TABLE_RECIPES
+        + ".ingredient="
+        + TABLE_INGREDIENT_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_CLIENT_INFO
+        + " ON "
+        + TABLE_BATCH_INFO
+        + ".client="
+        + TABLE_CLIENT_INFO
+        + ".id"
+        + " LEFT JOIN "
+        + TABLE_USER
+        + " ON "
+        + TABLE_BATCHES_DATA
+        + ".username="
+        + TABLE_USER
+        + ".id WHERE DATE(end_time) BETWEEN '"
+        + from_date
+        + "' AND '"
+        + to_date
+        + "' ;"
+    )
+    data = operation.fetch(query)
+    if not data:
+        return {"success": True, "data": data}
+    df = pd.DataFrame(data)
+    # Combine Batches
+    df.loc[:, "batch"] = (
+        df["batch_code"].astype(str) + " - " + df["batch_name"].astype(str)
+    )
+    # Combine Formulas
+    df.loc[:, "formula"] = (
+        df["formula_code"].astype(str) + " - " + df["formula_name"].astype(str)
+    )
+    # Combine Ingredients
+    df.loc[:, "ingredients"] = (
+        "[ "
+        + df["ingredient_code"].astype(str)
+        + " - "
+        + df["ingredient_name"].astype(str)
+        + " ("
+        + df["target_limit"].astype(str)
+        + " "
+        + df["weight_unit"].astype(str)
+        + ") ]"
+    )
+    # Convert weight in kg
+    df.loc[:, "weight_kg"] = np.where(
+        df["weight_unit"].eq("grams"), df["target_limit"] / 1000, df["target_limit"]
+    )
+    agg_dict = {
+        "id": "first",
+        "batch_count": "first",
+        "ingredient_weights": "first",
+        "start_time": "first",
+        "end_time": "first",
+        "batch": "first",
+        "total_batches": "first",
+        "formula": "first",
+        "formula_type": "first",
+        "ingredients": " , ".join,
+        "weight_kg": sum,
+        "username": "first",
+    }
+    df = df.groupby(["start_time", "end_time"], as_index=False).agg(agg_dict)
+    df = df.sort_values(by=["id"], ascending=False)
+    final_data = eval(df.to_json(orient="records"))
+    return {"success": True, "data": final_data}
+
+
+# --------------------- Report API : End ----------------------- #
+
+
+# --------------------- WiFi API : Start ----------------------- #
+
+
+@handle_exceptions
+def wifi_list():
+    print("hi from wifi list")
+    ssids = [cell.ssid for cell in Cell.all("wlp3s0")]
+    print("HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+    print(ssids)
+    print("HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+    return {"success": True, "data": ssids}
+
+
+@handle_exceptions
+def connect_wifi():
+    print("hi from connect wifi")
+    data = request.get_json()
+    ssid = data["wifi"]
+    password = data["password"]
+    print(password)
+    
+    wifi_list = list(Cell.all("wlp3s0"))
+    cell = wifi_list[0]
+    print(type(cell))
+    print("wifi list",wifi_list)
+    for cell in wifi_list:
+        if cell.ssid == ssid:
+            print(cell)
+            scheme = Scheme.for_cell("wlp3s0", ssid, cell, password)
+            print("ok")
+            scheme.save()
+            print("saved")
+            print(scheme)
+            #scheme.activate()
+            subprocess.check_output(['/sbin/ifconfig','wlp3s0','down'], stderr=subprocess.STDOUT)
+            ifup_output = subprocess.check_output(['/sbin/ifconfig','wlp3s0','up'] , stderr=subprocess.STDOUT)
+            ifup_output = ifup_output.decode('utf-8')
+            print("done")
+            return {"success": True, "message": "Successfully connected to " + ssid}
+    return {"success": False, "message": "Failed to connect " + ssid}
+
+
+# --------------------- WiFi API : End ----------------------- #
+
+
+# --------------------- Disk Space API : Start ----------------------- #
+@handle_exceptions
+@jwt_required()
+def get_disk_space():
+    total, used, free = shutil.disk_usage("/")
+    # In GB
+    data = {
+        "total": f"{total // (2**30)} GB",
+        "used": f"{used // (2**30)} GB",
+        "free": f"{free // (2**30)} GB",
+    }
+    return {"success": True, "data": data}
+
+
+# --------------------- Disk Space API : End ----------------------- #
+
+
+# --------------------- Label API : Start ----------------------- #
+
+
+@handle_exceptions
+@jwt_required()
+def get_all_label_info():
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_LABEL_INFO} ORDER BY id DESC;"
+    data = operation.fetch(query)
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def insert_label_info():
+    label_name = request.form["label_name"]
+    fmt_file = request.files["fmt_file"]
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    label_fmt = fmt_file.read().decode("utf-8").strip()
+    data = {
+        "label_name": label_name,
+        "label_fmt": label_fmt.replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\ufeff", "\\ufeff"),
+    }
+    col_list = ["label_name", "label_fmt"]
+    is_exist = Validation().is_record_exist(data, TABLE_LABEL_INFO, col_list)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "Label already exist with this Label Name or Label .fmt file !!!",
+        }
+    data["username"] = user_id
+    data["label_fmt"] = label_fmt
+    operation = DBTableOperations()
+    operation.create(table_name=TABLE_LABEL_INFO, data=data)
+    return {"success": True, "message": "Label Added Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def delete_label_info():
+    data = request.get_json()
+    label_id = data["id"]
+    is_exist = is_ref_exist(TABLE_SELECTED_LABEL, col_nm="label", id=label_id)
+    if is_exist:
+        return {
+            "success": False,
+            "message": "This Label is using. So can't delete. If you want to delete then first unselect the Label !!!",
+        }
+    operation = DBTableOperations()
+    query = f"DELETE FROM {TABLE_LABEL_INFO} WHERE id = {str(label_id)};"
+    operation.delete(query)
+    return {"success": True, "message": "Label Deleted Successfully !!!"}
+
+
+@handle_exceptions
+@jwt_required()
+def get_selected_label():
+    operation = DBTableOperations()
+    # query = f"SELECT * FROM {TABLE_SELECTED_LABEL};"
+    query = (
+        "SELECT "
+        + TABLE_SELECTED_LABEL
+        + ".*, "
+        + TABLE_LABEL_INFO
+        + ".label_fmt FROM "
+        + TABLE_SELECTED_LABEL
+        + " LEFT JOIN "
+        + TABLE_LABEL_INFO
+        + " ON "
+        + TABLE_SELECTED_LABEL
+        + ".label="
+        + TABLE_LABEL_INFO
+        + ".id;"
+    )
+    data = operation.fetch_one(query)
+    if data is None:
+        return {"success": False}
+    fmt_string = (
+        data.pop("label_fmt")
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\ufeff", "\ufeff")
+    )
+    pdf_string = label_view(fmt_string)
+    data["pdf_string"] = pdf_string
+    return {"success": True, "data": data}
+
+
+@handle_exceptions
+@jwt_required()
+def select_label():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    if user_id is None:
+        return {"success": False, "message": "Unauthenticated User."}
+    data["username"] = user_id
+    operation = DBTableOperations()
+    query = f"SELECT * FROM {TABLE_SELECTED_LABEL};"
+    selected_label = operation.fetch_one(query)
+    if selected_label is None:
+        operation = DBTableOperations()
+        operation.create(table_name=TABLE_SELECTED_LABEL, data=data)
+    else:
+        operation = DBTableOperations()
+        operation.update(
+            table_name=TABLE_SELECTED_LABEL, data=data, id=selected_label["id"]
+        )
+    return {
+        "success": True,
+        "message": "Label selected successfully !!!",
+    }
+
+
+def calibrate(self):
+        # adc, conv, offset, span, span_adc, zero, zero_adc
+        data = request.get_json()
+
+        span, span_adc = data[1], data[2]
+        zero, zero_adc = data[3], data[4]
+        if span_adc - zero_adc != 0:
+            conv = float(span - zero) / float(span_adc - zero_adc)
+            offset = float(conv * zero_adc)
+            #WtSensorDataModel().update_value("wt_conv", conv)
+            #WtSensorDataModel().update_value("wt_offset", offset)
+            logger.info(f"conversion factor = {conv}, offset = {offset}")
+
+# --------------------- Label API : End ----------------------- #
+
